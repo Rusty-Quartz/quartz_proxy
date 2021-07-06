@@ -1,11 +1,17 @@
+mod command;
+mod filter;
+mod timings;
+mod util;
+
 use async_executor::Executor;
 use async_io::Async;
 use async_lock::{Mutex, MutexGuard};
 use futures_lite::{future, AsyncReadExt, AsyncWriteExt};
 use linefeed::{Interface, ReadResult};
 use log::{error, info, warn};
+use once_cell::sync::Lazy;
 use quartz::{
-    chat::{Component, ComponentBuilder, color::PredefinedColor as Color},
+    chat::color::PredefinedColor as Color,
     network::{
         packet::{ClientBoundPacket, ServerBoundPacket},
         ConnectionState,
@@ -16,63 +22,35 @@ use quartz::{
     },
     util::logging,
 };
-use once_cell::sync::Lazy;
-use std::{u8, collections::HashSet, error::Error, fmt::{Debug, Display}, net::{Shutdown, TcpListener, TcpStream}, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread};
+use quartz_commands::CommandModule;
+use std::{
+    error::Error,
+    fmt::{Debug, Display},
+    net::{TcpListener, TcpStream},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
+    thread,
+};
 
-static EXECUTOR: Executor = Executor::new();
-static PACKET_FILTER: Lazy<Mutex<PacketFilter>> = Lazy::new(|| Mutex::new(PacketFilter::new()));
-static LOG_PACKETS: AtomicBool = AtomicBool::new(true);
+use command::*;
+use filter::*;
+use timings::*;
+use util::*;
 
-struct PacketFilter {
-    filter: HashSet<String>,
-    is_whitelist: bool,
-    disabled: bool
-}
-
-impl PacketFilter {
-    fn new() -> Self {
-        PacketFilter {
-            filter: HashSet::new(),
-            is_whitelist: true,
-            disabled: false
-        }
-    }
-
-    fn update(&mut self, packet: String, deny: bool) -> bool {
-        if self.is_whitelist ^ deny {
-            self.filter.insert(packet)
-        } else {
-            self.filter.remove(&packet)
-        }
-    }
-
-    fn reset_as(&mut self, whitelist: bool) {
-        self.is_whitelist = whitelist;
-        self.filter.clear();
-    }
-
-    fn set_disabled(&mut self, disabled: bool) -> bool {
-        let success = self.disabled != disabled;
-        if success {
-            self.disabled = disabled;
-        }
-        success
-    }
-
-    fn test(&self, packet: &str) -> bool {
-        if self.disabled {
-            return true;
-        }
-
-        let end = packet.char_indices().find(|&(_, ch)| ch == ' ').map(|(index, _)| index).unwrap_or(packet.len());
-        self.filter.contains(&packet[..end].to_ascii_lowercase()) == self.is_whitelist
-    }
-}
+pub static EXECUTOR: Executor = Executor::new();
+pub static PACKET_FILTER: Lazy<Mutex<PacketFilter>> = Lazy::new(|| Mutex::new(PacketFilter::new()));
+pub static LOG_PACKETS: AtomicBool = AtomicBool::new(true);
+pub static LOG_WARNINGS: AtomicBool = AtomicBool::new(true);
+pub static MAX_BUFFER_DISPLAY_LENGTH: AtomicUsize = AtomicUsize::new(64);
+pub static TIMINGS: Timings = Timings::new(50.0);
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Setup the console with a command prompt
     let console_interface = Arc::new(Interface::new("quartz-proxy")?);
     console_interface.set_prompt("> ")?;
+    console_interface.set_completer(Arc::new(ConsoleCompleter));
 
     // Initialize logging
     logging::init_logger(Some("quartz_proxy"), console_interface.clone())?;
@@ -125,7 +103,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                         match command.as_str() {
                             "stop" => break,
-                            cmd => handle_command(cmd).await,
+                            cmd =>
+                                if let Err(e) = Commands.dispatch(cmd.trim(), ()) {
+                                    display(e, Color::Red);
+                                },
                         }
                     }
                     _ => {}
@@ -232,64 +213,110 @@ async fn handle_connection<P: Debug, A: Display>(
     mut write: Async<TcpStream>,
     packet_parser: fn(&mut PacketBuffer, ConnectionState, usize) -> Result<P, PacketSerdeError>,
     state_manager: fn(&P, MutexGuard<'_, ConnectionState>),
-) -> Result<(), PacketSerdeError> {
+) {
     let mut buffer = PacketBuffer::new(4096);
 
     while *state.lock().await != ConnectionState::Disconnected {
         match read_packet(&mut read, &mut write, &mut buffer, &state).await {
-            Ok(packet_len) => {
+            Ok((packet_len, timer)) => {
                 // Client disconnected
                 if packet_len == 0 {
                     break;
                 }
                 // Handle the packet
                 else {
-                    let cursor_start = buffer.cursor();
-                    let state = state.lock().await;
-                    let should_log = LOG_PACKETS.load(Ordering::Relaxed);
-                    let packet = match packet_parser(&mut buffer, *state, packet_len) {
-                        Ok(packet) => packet,
-                        Err(error) => {
-                            if should_log {
-                                warn!("Failed to parse packet: {}, raw buffer:\n{:02X?}", error, &buffer[cursor_start .. cursor_start + packet_len]);
-                            }
-                            buffer.set_cursor(cursor_start + packet_len);
-                            continue;
-                        }
-                    };
-                    state_manager(&packet, state);
-                    if should_log {
-                        let debug_packet = format!("{:?}", packet);
-                        if PACKET_FILTER.lock().await.test(&debug_packet) {
-                            info!("Received packet from {}\n{:?}", read_addr, packet);
-                        }
-                    }
-                    buffer.set_cursor(cursor_start + packet_len);
+                    handle_packet(
+                        &mut buffer,
+                        &state,
+                        &read_addr,
+                        packet_len,
+                        timer,
+                        packet_parser,
+                        state_manager,
+                    )
+                    .await;
                 }
             }
             Err(e) => {
                 error!("Error in connection handler: {}", e);
-                shutdown(read)?;
-                shutdown(write)?;
+                let _ = shutdown(read);
+                let _ = shutdown(write);
                 break;
             }
         }
     }
-
-    Ok(())
 }
 
-async fn read_packet(
+async fn handle_packet<'a, P: Debug, A: Display>(
+    buffer: &mut PacketBuffer,
+    state: &Arc<Mutex<ConnectionState>>,
+    read_addr: &A,
+    packet_len: usize,
+    timer: Timer<'a>,
+    packet_parser: fn(&mut PacketBuffer, ConnectionState, usize) -> Result<P, PacketSerdeError>,
+    state_manager: fn(&P, MutexGuard<'_, ConnectionState>),
+) {
+    let cursor_start = buffer.cursor();
+    let state = state.lock().await;
+
+    let result = packet_parser(buffer, *state, packet_len);
+    timer.finish(cursor_start + packet_len).await;
+
+    match result {
+        Ok(packet) => {
+            state_manager(&packet, state);
+            if LOG_PACKETS.load(Ordering::Relaxed) {
+                let debug_packet = format!("{:?}", packet);
+                if PACKET_FILTER.lock().await.test(&debug_packet) {
+                    info!("Received packet from {}\n{:?}", read_addr, packet);
+                }
+            }
+        }
+        Err(error) =>
+            if LOG_PACKETS.load(Ordering::Relaxed) && LOG_WARNINGS.load(Ordering::Relaxed) {
+                buffer.set_cursor(cursor_start);
+                let suppress = match buffer.read_varying::<i32>() {
+                    Ok(id) => PACKET_FILTER
+                        .lock()
+                        .await
+                        .should_suppress_warning(id as u32),
+                    Err(e) => {
+                        warn!("Failed to detect packet ID: {}", e);
+                        false
+                    }
+                };
+
+                if *state != ConnectionState::Disconnected && !suppress {
+                    warn!(
+                        "Failed to parse packet from {}: {}, raw buffer:\n{}",
+                        read_addr,
+                        error,
+                        debug_buffer(
+                            &buffer[cursor_start .. cursor_start + packet_len],
+                            MAX_BUFFER_DISPLAY_LENGTH.load(Ordering::Relaxed)
+                        )
+                    );
+                }
+            },
+    };
+
+    // In the event that we fail horribly at parsing the packet, this should keep us on-track
+    buffer.set_cursor(cursor_start + packet_len);
+}
+
+pub async fn read_packet(
     source: &mut Async<TcpStream>,
     forward_to: &mut Async<TcpStream>,
     buffer: &mut PacketBuffer,
     state: &Arc<Mutex<ConnectionState>>,
-) -> Result<usize, PacketSerdeError> {
+) -> Result<(usize, Timer<'static>), PacketSerdeError> {
+    let timer = TIMINGS.spawn_timer();
+
     if buffer.remaining() > 0 {
         buffer.shift_remaining();
 
         // Don't decrypt the remaining bytes since that was already handled
-        return collect_packet(buffer, source, forward_to).await;
+        return Ok((collect_packet(buffer, source, forward_to).await?, timer));
     }
     // Prepare for the next packet
     else {
@@ -309,6 +336,9 @@ async fn read_packet(
         .await
         .map_err(|error| PacketSerdeError::Network(error))?;
 
+    // Reset the timer since we don't know how long we'll be waiting for data
+    let timer = TIMINGS.spawn_timer();
+
     // A read of zero bytes means the stream has closed
     if read == 0 {
         set_state(&mut *state.lock().await, ConnectionState::Disconnected);
@@ -323,15 +353,15 @@ async fn read_packet(
         if !(*state.lock().await == ConnectionState::Handshake
             && buffer.peek().unwrap_or(0) as i32 == LEGACY_PING_PACKET_ID)
         {
-            return collect_packet(buffer, source, forward_to).await;
+            return Ok((collect_packet(buffer, source, forward_to).await?, timer));
         }
     }
 
     // This is only reached if read == 0 or it's a legacy packet
-    Ok(read)
+    Ok((read, timer))
 }
 
-async fn collect_packet(
+pub async fn collect_packet(
     buffer: &mut PacketBuffer,
     source: &mut Async<TcpStream>,
     forward_to: &mut Async<TcpStream>,
@@ -353,201 +383,4 @@ async fn collect_packet(
     }
 
     Ok(data_len)
-}
-
-fn display<T: Display>(x: T, color: Color) {
-    println!("{}", Component::colored(x.to_string(), color));
-}
-
-fn shutdown(stream: Async<TcpStream>) -> Result<(), PacketSerdeError> {
-    stream
-        .into_inner()
-        .map_err(|error| PacketSerdeError::Network(error))?
-        .shutdown(Shutdown::Both)
-        .map_err(|error| PacketSerdeError::Network(error))?;
-    Ok(())
-}
-
-fn set_state(old_state: &mut ConnectionState, new_state: ConnectionState) {
-    if LOG_PACKETS.load(Ordering::Relaxed) {
-        info!(
-            "Connection state updated from {:?} to {:?}",
-            old_state, new_state
-        );
-    }
-    *old_state = new_state;
-}
-
-async fn handle_command(command: &str) {
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    let mut split = trimmed.split(' ');
-    let command = split.next();
-    if command.is_none() {
-        return;
-    }
-    let mut args = split.collect::<Vec<_>>();
-
-    macro_rules! expect_arg {
-        ($($expected:tt)*) => {{
-            if args.is_empty() {
-                display(format!("Expected additional argument(s): {}", $($expected)*), Color::Red);
-                return;
-            } else {
-                (args.remove(0), || { $($expected)* })
-            }
-        }}
-    }
-
-    match command.unwrap() {
-        "pause" => {
-            additional_args(&args);
-
-            match LOG_PACKETS.compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed) {
-                Ok(_) => display("Logging paused", Color::Green),
-                Err(_) => {
-                    println!(
-                        "{}",
-                        ComponentBuilder::empty()
-                            .color(Color::Yellow)
-                            .add_text("Logging is already paused. Use command ")
-                            .color(Color::Aqua)
-                            .add_text("resume")
-                            .color(Color::Yellow)
-                            .add_text(" to resume logging.")
-                            .build()
-                    )
-                }
-            }
-        },
-        "resume" => {
-            additional_args(&args);
-
-            match LOG_PACKETS.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
-                Ok(_) => display("Logging resumed", Color::Green),
-                Err(_) => {
-                    println!(
-                        "{}",
-                        ComponentBuilder::empty()
-                            .color(Color::Yellow)
-                            .add_text("The proxy is currently logging packets. Use command ")
-                            .color(Color::Aqua)
-                            .add_text("pause")
-                            .color(Color::Yellow)
-                            .add_text(" to pause logging.")
-                            .build()
-                    )
-                }
-            }
-        },
-        "filter" => {
-            const ACTIONS: [&str; 7] = ["allow", "deny", "enable", "disable", "reset", "reset-as", "display"];
-
-            let (action, expected_action) = expect_arg!({
-                let mut builder = ComponentBuilder::empty()
-                    .color(Color::Red)
-                    .add_text("one of ");
-                for action in &ACTIONS[..ACTIONS.len() - 1] {
-                    builder = builder.color(Color::Gold).add_text(action).add_text(", ");
-                }
-                builder.add_text("or ").color(Color::Gold).add_text(ACTIONS[ACTIONS.len() - 1]).build()
-            });
-
-            let mut filter = PACKET_FILTER.lock().await;
-
-            match action {
-                "allow" | "deny" => {
-                    let (packet, _) = expect_arg!("packet name");
-                    if filter.update(packet.to_ascii_lowercase(), action == "deny") {
-                        display("Filter successfully updated", Color::Green);
-                    } else {
-                        display("This packet is already handled by the filter.", Color::Yellow);
-                    }
-                },
-                "enable" | "disable" => {
-                    if filter.set_disabled(action == "disable") {
-                        display(format!("Packet filter {}d", action), Color::Green);
-                    } else {
-                        display(format!("The filter is already {}d", action), Color::Yellow);
-                    }
-                },
-                "reset" => {
-                    filter.filter.clear();
-                    display("Filter reset.", Color::Green);
-                },
-                "reset-as" => {
-                    let (mode, expected_mode) = expect_arg!({
-                        ComponentBuilder::empty()
-                            .color(Color::Red)
-                            .add_text("one of ")
-                            .color(Color::Gold)
-                            .add_text("whitelist")
-                            .color(Color::Red)
-                            .add_text(" or ")
-                            .color(Color::Gold)
-                            .add_text("blacklist")
-                            .build()
-                    });
-
-                    match mode {
-                        "whitelist" | "blacklist" => {
-                            filter.reset_as(mode == "whitelist");
-                            display(format!("Reset filter and set mode to {}", mode), Color::Green);
-                        },
-                        _ => display(format!("Invalid filter mode, expected {}", expected_mode()), Color::Red)
-                    }
-                },
-                "display" => {
-                    display(
-                        format!(
-                            "[{}] {}",
-                            if filter.is_whitelist {
-                                "whitelist"
-                            } else {
-                                "blacklist"
-                            },
-                            if filter.filter.is_empty() {
-                                "<empty>".to_owned()
-                            } else {
-                                let mut elements = filter.filter.iter().cloned().collect::<Vec<_>>();
-                                elements.sort();
-                                elements.join(", ")
-                            }
-                        ),
-                        Color::White
-                    );
-                },
-                _ => display(format!("Invalid action, expected {}", expected_action()), Color::Red)
-            }
-        },
-        "varint" => {
-            if args.is_empty() {
-                display("Expected list of space-separated bytes in hexadecimal form", Color::Red);
-                return;
-            }
-
-            let mut bytes = PacketBuffer::new(args.len());
-            for by in args.into_iter().map(|by| if by.ends_with(',') { &by[..by.len() - 1] } else { by }) {
-                match u8::from_str_radix(by, 16) {
-                    Ok(by) => bytes.write_one(by),
-                    Err(e) => display(format!("Failed to parse bytes: {}", e), Color::Red)
-                }
-            }
-
-            bytes.reset_cursor();
-            match bytes.read_varying::<i64>() {
-                Ok(value) => display(format!("varint({:02X?}) = {}", &bytes[..bytes.cursor()], value), Color::White),
-                Err(error) => display(error, Color::Red)
-            }
-        }
-        _ => display("Invalid command", Color::Red)
-    }
-}
-
-fn additional_args(args: &[&str]) {
-    if !args.is_empty() {
-        display(format!("Ignoring additional arguments {}", args.to_owned().join(", ")), Color::Yellow);
-    }
 }
