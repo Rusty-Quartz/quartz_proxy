@@ -13,4 +13,7 @@ linefeed = "0.6.0"
 log = "0.4.14"
 once_cell = "1.8.0"
 quartz = { path = "../Quartz/quartz" }
-quartz_commands = { path = "../quartz_commands" }
+quartz_commands = "0.1"
+
+[profile.release]
+debug = 2

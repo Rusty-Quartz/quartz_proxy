@@ -28,7 +28,7 @@ module! {
 
     command pause {
         root executes |_ctx| {
-            match LOG_PACKETS.compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed) {
+            match LOG_PACKETS.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst) {
                 Ok(_) => display("Logging paused", Color::Green),
                 Err(_) => {
                     println!(
@@ -50,7 +50,7 @@ module! {
 
     command resume {
         root executes |_ctx| {
-            match LOG_PACKETS.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
+            match LOG_PACKETS.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst) {
                 Ok(_) => display("Logging resumed", Color::Green),
                 Err(_) => {
                     println!(
@@ -217,13 +217,13 @@ module! {
         any[len: usize, "none"],
     {
         len executes |_ctx| {
-            MAX_BUFFER_DISPLAY_LENGTH.store(len, Ordering::Relaxed);
+            MAX_BUFFER_DISPLAY_LENGTH.store(len, Ordering::SeqCst);
             display(format!("Buffer display length limit set to {} bytes", len), Color::Green);
             Ok(())
         };
 
         "none" executes |_ctx| {
-            MAX_BUFFER_DISPLAY_LENGTH.store(usize::MAX, Ordering::Relaxed);
+            MAX_BUFFER_DISPLAY_LENGTH.store(usize::MAX, Ordering::SeqCst);
             display("Removed buffer display length limit.", Color::Green);
             Ok(())
         };
@@ -328,8 +328,8 @@ fn set_warnings_enabled(mode: &str) -> Result<(), String> {
     match LOG_WARNINGS.compare_exchange(
         mode == "off",
         mode == "on",
-        Ordering::Acquire,
-        Ordering::Relaxed,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
     ) {
         Ok(_) => display(format!("Warnings turned {}", mode), Color::Green),
         Err(_) => display(format!("Warnings are already {}", mode), Color::Yellow),

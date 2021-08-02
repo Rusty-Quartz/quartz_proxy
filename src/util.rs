@@ -25,7 +25,7 @@ pub fn shutdown(stream: Async<TcpStream>) -> Result<(), PacketSerdeError> {
 }
 
 pub fn set_state(old_state: &mut ConnectionState, new_state: ConnectionState) {
-    if LOG_PACKETS.load(Ordering::Relaxed) {
+    if LOG_PACKETS.load(Ordering::SeqCst) {
         info!(
             "Connection state updated from {:?} to {:?}",
             old_state, new_state

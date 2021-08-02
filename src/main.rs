@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     console_interface.set_completer(Arc::new(ConsoleCompleter));
 
     // Initialize logging
-    logging::init_logger(Some("quartz_proxy"), console_interface.clone())?;
+    logging::init_logger(Some(|path| path.starts_with("quartz")), console_interface.clone())?;
 
     let proxy_server = match TcpListener::bind("0.0.0.0:25566") {
         Ok(listener) => listener,
@@ -265,7 +265,7 @@ async fn handle_packet<'a, P: Debug, A: Display>(
     match result {
         Ok(packet) => {
             state_manager(&packet, state);
-            if LOG_PACKETS.load(Ordering::Relaxed) {
+            if LOG_PACKETS.load(Ordering::SeqCst) {
                 let debug_packet = format!("{:?}", packet);
                 if PACKET_FILTER.lock().await.test(&debug_packet) {
                     info!("Received packet from {}\n{:?}", read_addr, packet);
@@ -273,7 +273,7 @@ async fn handle_packet<'a, P: Debug, A: Display>(
             }
         }
         Err(error) =>
-            if LOG_PACKETS.load(Ordering::Relaxed) && LOG_WARNINGS.load(Ordering::Relaxed) {
+            if LOG_PACKETS.load(Ordering::SeqCst) && LOG_WARNINGS.load(Ordering::SeqCst) {
                 buffer.set_cursor(cursor_start);
                 let suppress = match buffer.read_varying::<i32>() {
                     Ok(id) => PACKET_FILTER
@@ -293,7 +293,7 @@ async fn handle_packet<'a, P: Debug, A: Display>(
                         error,
                         debug_buffer(
                             &buffer[cursor_start .. cursor_start + packet_len],
-                            MAX_BUFFER_DISPLAY_LENGTH.load(Ordering::Relaxed)
+                            MAX_BUFFER_DISPLAY_LENGTH.load(Ordering::SeqCst)
                         )
                     );
                 }
@@ -351,7 +351,7 @@ pub async fn read_packet(
 
         // The legacy ping packet has no length prefix, so only collect the packet if it's not legacy
         if !(*state.lock().await == ConnectionState::Handshake
-            && buffer.peek().unwrap_or(0) as i32 == LEGACY_PING_PACKET_ID)
+            && buffer.peek_one().unwrap_or(0) as i32 == LEGACY_PING_PACKET_ID)
         {
             return Ok((collect_packet(buffer, source, forward_to).await?, timer));
         }
