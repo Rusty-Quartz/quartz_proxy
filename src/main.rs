@@ -10,19 +10,18 @@ use futures_lite::{future, AsyncReadExt, AsyncWriteExt};
 use linefeed::{Interface, ReadResult};
 use log::{error, info, warn};
 use once_cell::sync::Lazy;
-use quartz::{
-    chat::color::PredefinedColor as Color,
-    network::{
-        packet::{ClientBoundPacket, ServerBoundPacket},
-        ConnectionState,
-        PacketBuffer,
-        PacketSerdeError,
-        LEGACY_PING_PACKET_ID,
-        PROTOCOL_VERSION,
-    },
-    util::logging,
-};
+use quartz_chat::color::PredefinedColor as Color;
 use quartz_commands::CommandModule;
+use quartz_net::{
+    ClientBoundPacket,
+    ConnectionState,
+    PacketBuffer,
+    PacketSerdeError,
+    ServerBoundPacket,
+    LEGACY_PING_PACKET_ID,
+    PROTOCOL_VERSION,
+};
+use quartz_util::logging;
 use std::{
     error::Error,
     fmt::{Debug, Display},
@@ -53,7 +52,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     console_interface.set_completer(Arc::new(ConsoleCompleter));
 
     // Initialize logging
-    logging::init_logger(Some(|path| path.starts_with("quartz")), console_interface.clone())?;
+    logging::init_logger(
+        Some(|path| path.starts_with("quartz")),
+        console_interface.clone(),
+    )?;
 
     let proxy_server = match TcpListener::bind("0.0.0.0:25566") {
         Ok(listener) => listener,
@@ -97,8 +99,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     future::block_on(async move {
         loop {
             match console_interface.read_line() {
-                Ok(result) => match result {
-                    ReadResult::Input(command) => {
+                Ok(result) =>
+                    if let ReadResult::Input(command) = result {
                         console_interface.add_history_unique(command.clone());
 
                         match command.as_str() {
@@ -108,9 +110,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     display(e, Color::Red);
                                 },
                         }
-                    }
-                    _ => {}
-                },
+                    },
                 Err(e) => {
                     error!("Failed to read console input: {}", e);
                     break;
@@ -176,24 +176,22 @@ async fn handle_incoming_connection(server: Async<TcpListener>) -> Result<(), Bo
 }
 
 fn handle_server_state(packet: &ServerBoundPacket, mut state: MutexGuard<'_, ConnectionState>) {
-    match packet {
-        ServerBoundPacket::Handshake {
-            protocol_version,
-            next_state,
-            ..
-        } => {
-            if *protocol_version != PROTOCOL_VERSION {
-                set_state(&mut *state, ConnectionState::Disconnected);
-                return;
-            }
-
-            if *next_state == 1 {
-                set_state(&mut *state, ConnectionState::Status);
-            } else if *next_state == 2 {
-                set_state(&mut *state, ConnectionState::Login);
-            }
+    if let ServerBoundPacket::Handshake {
+        protocol_version,
+        next_state,
+        ..
+    } = packet
+    {
+        if *protocol_version != PROTOCOL_VERSION {
+            set_state(&mut *state, ConnectionState::Disconnected);
+            return;
         }
-        _ => {}
+
+        if *next_state == 1 {
+            set_state(&mut *state, ConnectionState::Status);
+        } else if *next_state == 2 {
+            set_state(&mut *state, ConnectionState::Login);
+        }
     }
 }
 
@@ -202,6 +200,16 @@ fn handle_client_state(packet: &ClientBoundPacket, mut state: MutexGuard<'_, Con
         ClientBoundPacket::LoginSuccess { .. } => {
             set_state(&mut *state, ConnectionState::Play);
         }
+        ClientBoundPacket::ChunkData {
+            chunk_x,
+            chunk_z,
+            data,
+            ..
+        } => std::fs::write(
+            format!("./section_data/section_{}_{}.txt", chunk_x, chunk_z),
+            format!("{:02X?}", data.sections),
+        )
+        .unwrap(),
         _ => {}
     }
 }
@@ -247,12 +255,12 @@ async fn handle_connection<P: Debug, A: Display>(
     }
 }
 
-async fn handle_packet<'a, P: Debug, A: Display>(
+async fn handle_packet<P: Debug, A: Display>(
     buffer: &mut PacketBuffer,
     state: &Arc<Mutex<ConnectionState>>,
     read_addr: &A,
     packet_len: usize,
-    timer: Timer<'a>,
+    timer: Timer<'_>,
     packet_parser: fn(&mut PacketBuffer, ConnectionState, usize) -> Result<P, PacketSerdeError>,
     state_manager: fn(&P, MutexGuard<'_, ConnectionState>),
 ) {
@@ -330,11 +338,11 @@ pub async fn read_packet(
     let read = source
         .read(&mut buffer[..])
         .await
-        .map_err(|error| PacketSerdeError::Network(error))?;
+        .map_err(PacketSerdeError::Network)?;
     forward_to
         .write_all(&buffer[.. read])
         .await
-        .map_err(|error| PacketSerdeError::Network(error))?;
+        .map_err(PacketSerdeError::Network)?;
 
     // Reset the timer since we don't know how long we'll be waiting for data
     let timer = TIMINGS.spawn_timer();
@@ -375,11 +383,11 @@ pub async fn collect_packet(
         source
             .read_exact(&mut buffer[end ..])
             .await
-            .map_err(|e| PacketSerdeError::Network(e))?;
+            .map_err(PacketSerdeError::Network)?;
         forward_to
             .write_all(&buffer[end ..])
             .await
-            .map_err(|e| PacketSerdeError::Network(e))?;
+            .map_err(PacketSerdeError::Network)?;
     }
 
     Ok(data_len)

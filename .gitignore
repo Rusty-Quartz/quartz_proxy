@@ -1,3 +1,4 @@
 /target
 /run
+/logs
 Cargo.lock

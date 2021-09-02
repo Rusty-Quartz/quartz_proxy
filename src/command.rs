@@ -8,11 +8,9 @@ use crate::{
 };
 use futures_lite::future;
 use linefeed::{Completer, Completion, DefaultTerminal, Prompter, Suffix};
-use quartz::{
-    chat::{color::PredefinedColor as Color, ComponentBuilder},
-    network::PacketBuffer,
-};
+use quartz_chat::{color::PredefinedColor as Color, ComponentBuilder};
 use quartz_commands::{module, CommandModule, Help};
+use quartz_net::PacketBuffer;
 use std::sync::atomic::Ordering;
 
 module! {
@@ -452,7 +450,16 @@ fn show_help() {
         .color(Color::Aqua)
         .add_text("mbdl none")
         .color(Color::White)
-        .add_text(" will remove the display length limit.");
+        .add_text(" will remove the display length limit.\n");
+
+    builder = builder
+        .color(Color::Gold)
+        .add_text("metrics: ")
+        .color(Color::White)
+        .add_text(
+            "Displays the proxy metrics. Currently this just displays the approximate rate of \
+             packet processing in megabits per second.",
+        );
 
     println!("{}", builder.build());
 }
@@ -568,15 +575,6 @@ fn show_warnings_help() {
         .add_text(
             "Enables or disables the logging of warnings associated with packet parsing. Other \
              warnings will still be logged.\n",
-        );
-
-    builder = builder
-        .color(Color::Gold)
-        .add_text("metrics: ")
-        .color(Color::White)
-        .add_text(
-            "Displays the proxy metrics. Currently this just displays the approximate rate of \
-             packet processing in megabits per second.",
         );
 
     println!("{}", builder.build());

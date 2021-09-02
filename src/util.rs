@@ -1,10 +1,8 @@
 use crate::LOG_PACKETS;
 use async_io::Async;
 use log::info;
-use quartz::{
-    chat::{color::PredefinedColor as Color, Component},
-    network::{ConnectionState, PacketSerdeError},
-};
+use quartz_chat::{color::PredefinedColor as Color, Component};
+use quartz_net::{ConnectionState, PacketSerdeError};
 use std::{
     fmt::Display,
     net::{Shutdown, TcpStream},
