@@ -200,16 +200,6 @@ fn handle_client_state(packet: &ClientBoundPacket, mut state: MutexGuard<'_, Con
         ClientBoundPacket::LoginSuccess { .. } => {
             set_state(&mut *state, ConnectionState::Play);
         }
-        ClientBoundPacket::ChunkData {
-            chunk_x,
-            chunk_z,
-            data,
-            ..
-        } => std::fs::write(
-            format!("./section_data/section_{}_{}.txt", chunk_x, chunk_z),
-            format!("{:02X?}", data.sections),
-        )
-        .unwrap(),
         _ => {}
     }
 }
