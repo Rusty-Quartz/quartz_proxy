@@ -147,6 +147,7 @@ async fn handle_incoming_connection(server: Async<TcpListener>) -> Result<(), Bo
                             state_clone,
                             socket_read,
                             addr,
+                            "server",
                             client_proxy_write,
                             ServerBoundPacket::read_from,
                             handle_server_state,
@@ -160,6 +161,7 @@ async fn handle_incoming_connection(server: Async<TcpListener>) -> Result<(), Bo
                             state,
                             client_proxy_read,
                             "server",
+                            addr,
                             socket_write,
                             ClientBoundPacket::read_from,
                             handle_client_state,
@@ -204,10 +206,11 @@ fn handle_client_state(packet: &ClientBoundPacket, mut state: MutexGuard<'_, Con
     }
 }
 
-async fn handle_connection<P: Debug, A: Display>(
+async fn handle_connection<P: Debug, R: Display, W: Display>(
     state: Arc<Mutex<ConnectionState>>,
     mut read: Async<TcpStream>,
-    read_addr: A,
+    read_addr: R,
+    write_addr: W,
     mut write: Async<TcpStream>,
     packet_parser: fn(&mut PacketBuffer, ConnectionState, usize) -> Result<P, PacketSerdeError>,
     state_manager: fn(&P, MutexGuard<'_, ConnectionState>),
@@ -227,6 +230,7 @@ async fn handle_connection<P: Debug, A: Display>(
                         &mut buffer,
                         &state,
                         &read_addr,
+                        &write_addr,
                         packet_len,
                         timer,
                         packet_parser,
@@ -245,10 +249,11 @@ async fn handle_connection<P: Debug, A: Display>(
     }
 }
 
-async fn handle_packet<P: Debug, A: Display>(
+async fn handle_packet<P: Debug, R: Display, W: Display>(
     buffer: &mut PacketBuffer,
     state: &Arc<Mutex<ConnectionState>>,
-    read_addr: &A,
+    read_addr: &R,
+    write_addr: &W,
     packet_len: usize,
     timer: Timer<'_>,
     packet_parser: fn(&mut PacketBuffer, ConnectionState, usize) -> Result<P, PacketSerdeError>,
@@ -266,7 +271,10 @@ async fn handle_packet<P: Debug, A: Display>(
             if LOG_PACKETS.load(Ordering::SeqCst) {
                 let debug_packet = format!("{:?}", packet);
                 if PACKET_FILTER.lock().await.test(&debug_packet) {
-                    info!("Received packet from {}\n{:?}", read_addr, packet);
+                    info!(
+                        "Received packet from {} for {}\n{:?}",
+                        read_addr, write_addr, packet
+                    );
                 }
             }
         }
