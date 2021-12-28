@@ -11,7 +11,7 @@ use linefeed::{Completer, Completion, DefaultTerminal, Prompter, Suffix};
 use quartz_chat::{color::PredefinedColor as Color, ComponentBuilder};
 use quartz_commands::{module, CommandModule, Help};
 use quartz_net::PacketBuffer;
-use std::sync::atomic::Ordering;
+use std::{fs::OpenOptions, io::Read, sync::atomic::Ordering};
 
 module! {
     pub mod commands;
@@ -72,6 +72,7 @@ module! {
     where
         "allow" => allow_packet: String,
         "deny" => deny_packet: String,
+        "load" => filter_file: String => any filter_mode["whitelist" as load_whitelist, "blacklist" as load_blacklist],
         "reset-as" => any["whitelist" as reset_as_whitelist, "blacklist" as reset_as_blacklist],
         any["enable", "disable", "reset", "display", help: Help<'cmd>],
     {
@@ -113,6 +114,10 @@ module! {
             );
             Ok(())
         };
+
+        filter_file executes |_ctx| load_filter(filter_file, true);
+        load_whitelist executes |_ctx| load_filter(filter_file, true);
+        load_blacklist executes |_ctx| load_filter(filter_file, false);
 
         help executes |_ctx| {
             show_filter_help();
@@ -275,6 +280,34 @@ fn update_filter(packet: String, deny: bool) -> Result<(), String> {
             Color::Yellow,
         );
     }
+
+    Ok(())
+}
+
+fn load_filter(file_path: String, whitelist: bool) -> Result<(), String> {
+    let mut filter = future::block_on(PACKET_FILTER.lock());
+
+    filter.reset_as(whitelist);
+
+    let mut filter_file = OpenOptions::new()
+        .read(true)
+        .write(false)
+        .open(file_path)
+        .map_err(|e| format!("Error opening filter file: {}", e))?;
+
+    let mut file_contents = String::new();
+
+    filter_file
+        .read_to_string(&mut file_contents)
+        .map_err(|e| format!("Error reading filter file: {}", e))?;
+
+    let filter_list = file_contents.split(' ');
+
+    for packet in filter_list {
+        filter.update(packet.to_owned(), !whitelist);
+    }
+
+    display("Filter loaded from file successfully", Color::Green);
 
     Ok(())
 }
@@ -525,6 +558,28 @@ fn show_filter_help() {
             "Resets the filter and changes its mode to the given mode. Whitelist filters allow \
              logging of packets in the filter, whereas blacklist filters only allow logging of \
              packets not in the filter.\n",
+        );
+
+    builder = builder
+        .color(Color::Gold)
+        .add_text("filter load <")
+        .color(Color::White)
+        .add_text("filter file")
+        .color(Color::Gold)
+        .add_text("> [")
+        .color(Color::White)
+        .add_text("whitelist")
+        .color(Color::Gold)
+        .add_text("|")
+        .color(Color::White)
+        .add_text("blacklist")
+        .color(Color::Gold)
+        .add_text("]: ")
+        .color(Color::White)
+        .add_text(
+            "Resets the filter and loads the contents of a space seperated list stored in a file. \
+             Optionally you can specify the mode to load the filter in with it defaulting to \
+             whitelisting",
         );
 
     builder = builder
