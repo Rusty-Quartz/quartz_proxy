@@ -10,7 +10,7 @@ use futures_lite::{future, AsyncReadExt, AsyncWriteExt};
 use linefeed::{Interface, ReadResult};
 use log::{error, info, warn};
 use once_cell::sync::Lazy;
-use quartz_chat::color::PredefinedColor as Color;
+use quartz_chat::color::Color;
 use quartz_commands::CommandModule;
 use quartz_net::{
     ClientBoundPacket,

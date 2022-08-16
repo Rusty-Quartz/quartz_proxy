@@ -8,7 +8,7 @@ use crate::{
 };
 use futures_lite::future;
 use linefeed::{Completer, Completion, DefaultTerminal, Prompter, Suffix};
-use quartz_chat::{color::PredefinedColor as Color, ComponentBuilder};
+use quartz_chat::{color::Color, ComponentBuilder};
 use quartz_commands::{module, CommandModule, Help};
 use quartz_net::PacketBuffer;
 use std::{fs::OpenOptions, io::Read, sync::atomic::Ordering};

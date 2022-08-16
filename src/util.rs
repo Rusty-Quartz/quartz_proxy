@@ -1,7 +1,7 @@
 use crate::LOG_PACKETS;
 use async_io::Async;
 use log::info;
-use quartz_chat::{color::PredefinedColor as Color, Component};
+use quartz_chat::{color::Color, Component};
 use quartz_net::{ConnectionState, PacketSerdeError};
 use std::{
     fmt::Display,
